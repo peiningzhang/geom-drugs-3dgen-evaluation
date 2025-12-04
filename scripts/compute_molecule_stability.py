@@ -39,6 +39,35 @@ def main():
         print(f"Total atoms: {int(n_atoms.sum())}")
         print(
             f"Stable atoms: {int(n_stable_atoms.sum())} ({(n_stable_atoms.sum() / n_atoms.sum()):.4f})")
+    elif args.n_subsets == -1:
+        # 统计各个atom_number下同时Valid和stable的比例
+        from collections import defaultdict
+        validity, stable_mask, n_stable_atoms, n_atoms = compute_molecules_stability(mols,
+                                                                                     aromatic=aromatic)
+        atom_count_stats = defaultdict(lambda: {'total': 0, 'valid_and_stable': 0})
+        
+        for i, mol in enumerate(mols):
+            if mol is not None:
+                atom_count = n_atoms[i].item()
+                is_valid = validity[i].item() > 0
+                is_stable = stable_mask[i].item() > 0
+                
+                atom_count_stats[atom_count]['total'] += 1
+                if is_valid and is_stable:
+                    atom_count_stats[atom_count]['valid_and_stable'] += 1
+        
+        # 按atom_number从小到大排序并打印
+        print("\nMolecules that are both Valid and Stable by atom count:")
+        for atom_count in sorted(atom_count_stats.keys()):
+            stats = atom_count_stats[atom_count]
+            ratio = stats['valid_and_stable'] / stats['total'] if stats['total'] > 0 else 0
+            print(f"Atom count {atom_count}: {stats['valid_and_stable']} / {stats['total']} ({ratio:.4f})")
+        print(f"Valid molecules: {int(validity.sum())} / {len(mols)} ({validity.mean():.4f})")
+        print(
+            f"Stable molecules: {int(stable_mask.sum())} / {len(mols)} ({stable_mask.mean():.4f})")
+        print(f"Total atoms: {int(n_atoms.sum())}")
+        print(
+            f"Stable atoms: {int(n_stable_atoms.sum())} ({(n_stable_atoms.sum() / n_atoms.sum()):.4f})")
     else:
         mols_per_set = len(mols) // args.n_subsets
         valids, mols_stable, atoms_stable = [], [], []

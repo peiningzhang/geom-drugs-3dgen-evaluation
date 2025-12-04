@@ -2,6 +2,8 @@ import argparse
 import os
 import re
 import subprocess
+import multiprocessing as mp
+from functools import partial
 
 from rdkit import Chem
 from tqdm import tqdm
@@ -21,9 +23,14 @@ def run_xtb_optimization(xyz_filename, output_prefix, charge):
     output_filename = f"{output_prefix}_xtb_output.out"
 
     # Pass the charge to xTB using --charge flag
-    command = f"xtb {xyz_filename} --opt --charge {charge} --namespace {output_prefix} > {output_filename}"
+    command = f"xtb {xyz_filename} --opt --charge {charge} --namespace {output_prefix} > {output_filename} 2>&1"
 
-    subprocess.run(command, shell=True)
+    result = subprocess.run(command, shell=True, capture_output=False)
+    
+    # To ensure the output file is created
+    if not os.path.exists(output_filename):
+        raise FileNotFoundError(f"xTB output file not created: {output_filename}")
+    
     with open(output_filename, 'r') as f:
         xtb_output = f.read()
     return xtb_output
@@ -98,8 +105,12 @@ def process_molecule(args):
     if mol is None:
         return None, None, None
 
-    xyz_filename = f"mol_{i}.xyz"
-    output_prefix = f"mol_{i}"
+    # Use process ID and molecule index to create a unique file name prefix
+    process_id = os.getpid()
+    unique_prefix = f"mol_{i}_{process_id}"
+    
+    xyz_filename = f"{unique_prefix}.xyz"
+    output_prefix = unique_prefix
     xtb_topo_filename = f"{output_prefix}.xtbtopo.mol"
 
     sdf_to_xyz(mol, xyz_filename)
@@ -123,9 +134,9 @@ def process_molecule(args):
         return None, None, None
 
     finally:
-        if int(i) > 5:
-            remove_files_with_regex("./", r"^mol_{}.*".format(i))
-            remove_files_with_regex("./", r"^\.mol_{}.*".format(i))
+        # Clean up all files related to this molecule
+        remove_files_with_regex("./", r"^{}.*".format(re.escape(unique_prefix)))
+        remove_files_with_regex("./", r"^\.{}.*".format(re.escape(unique_prefix)))
 
 
 def write_results_to_file(output_sdf, optimized_mols, how="w"):
@@ -134,35 +145,75 @@ def write_results_to_file(output_sdf, optimized_mols, how="w"):
         for mol in optimized_mols:
             write_mol_to_sdf(mol, f)
 
-def main_fn(input_sdf, output_sdf, init_sdf):
-    suppl = Chem.SDMolSupplier(input_sdf, sanitize=False, removeHs=False)
-    optimized_mols = []
-    init_mols = []
 
-    # Remove existing output file to start fresh
+def main_fn(input_sdf, output_sdf, init_sdf, num_processes=None):
+    """
+    Multi-process version of the main function
+    
+    Args:
+        input_sdf: Input SDF file path
+        output_sdf: Output optimized SDF file path
+        init_sdf: Output initial structures SDF file path
+        num_processes: Number of processes, default is None (use all CPU cores)
+    """
+    # If no number of processes is specified, use all available CPU cores
+    if num_processes is None:
+        num_processes = mp.cpu_count()
+    
+    print(f"Using {num_processes} processes for parallel processing")
+    
+    suppl = Chem.SDMolSupplier(input_sdf, sanitize=False, removeHs=False)
+    
+    # Pre-read all molecules to avoid accessing SDMolSupplier in multiple processes
+    molecules = []
+    for i, mol in enumerate(suppl):
+        molecules.append((i, mol))
+    
+    print(f"Loaded {len(molecules)} molecules from {input_sdf}")
+    
+    # Remove existing output files to start fresh
     if os.path.exists(output_sdf):
         os.remove(output_sdf)
-    try:
-        for task in tqdm(enumerate(suppl)):
-            optimized_mol, total_energy_gain, total_rmsd = process_molecule(task)
-            if optimized_mol is not None:
-                if task[1].HasProp("_Name"):
-                    optimized_mol.SetProp("_Name", task[1].GetProp("_Name"))
-                else:
-                    optimized_mol.SetProp("_Name", str(task[0]))
-                if total_energy_gain is not None:
-                    optimized_mol.SetProp("energy_gain", f"{total_energy_gain:.4f}")
-                if total_rmsd is not None:
-                    optimized_mol.SetProp("RMSD", f"{total_rmsd:.4f}")
-                init_mols.append(task[1])
-                optimized_mols.append(optimized_mol)
-    finally:
-        # Write remaining optimized molecules to the SDF file
-        if optimized_mols:
-            write_results_to_file(output_sdf, optimized_mols)
-            write_results_to_file(init_sdf, init_mols)
-
-    print(f"Successfully processed molecules.")
+    if os.path.exists(init_sdf):
+        os.remove(init_sdf)
+    
+    optimized_mols = []
+    init_mols = []
+    
+    # Use multiple processes to process molecules
+    with mp.Pool(processes=num_processes) as pool:
+        # Use tqdm to display progress
+        results = list(tqdm(
+            pool.imap(process_molecule, molecules),
+            total=len(molecules),
+            desc="Processing molecules"
+        ))
+    
+    # Process results
+    for i, (optimized_mol, total_energy_gain, total_rmsd) in enumerate(results):
+        if optimized_mol is not None:
+            original_mol = molecules[i][1]  # Get the original molecule
+            
+            # Set molecule properties
+            if original_mol.HasProp("_Name"):
+                optimized_mol.SetProp("_Name", original_mol.GetProp("_Name"))
+            else:
+                optimized_mol.SetProp("_Name", str(i))
+            
+            if total_energy_gain is not None:
+                optimized_mol.SetProp("energy_gain", f"{total_energy_gain:.4f}")
+            if total_rmsd is not None:
+                optimized_mol.SetProp("RMSD", f"{total_rmsd:.4f}")
+            
+            init_mols.append(original_mol)
+            optimized_mols.append(optimized_mol)
+    
+    # Write results to files
+    if optimized_mols:
+        write_results_to_file(output_sdf, optimized_mols)
+        write_results_to_file(init_sdf, init_mols)
+    
+    print(f"Successfully processed {len(optimized_mols)} molecules out of {len(molecules)} total.")
 
 
 if __name__ == "__main__":
@@ -170,5 +221,6 @@ if __name__ == "__main__":
     parser.add_argument("--input_sdf", type=str, required=True, help="Path to input .sdf file")
     parser.add_argument("--output_sdf", type=str, required=True, help="Path to output optimized .sdf")
     parser.add_argument("--init_sdf", type=str, required=True, help="Path to output initial structures .sdf")
+    parser.add_argument("--num_processes", type=int, default=None, help="Number of processes to use (default: all CPU cores)")
     args = parser.parse_args()
-    main_fn(args.input_sdf, args.output_sdf, args.init_sdf)
+    main_fn(args.input_sdf, args.output_sdf, args.init_sdf, args.num_processes)
