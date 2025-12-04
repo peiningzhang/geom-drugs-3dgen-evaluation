@@ -1,6 +1,6 @@
 #!/bin/bash
 export PATH="$PWD/xtb-dist/bin:$PATH"
-export PYTHONPATH=/home/phz24002/Drug_Discovery/geom-drugs-3dgen-evaluation:$PYTHONPATH
+export PYTHONPATH="$PWD:$PYTHONPATH"
 # 获取时间戳
 timestamp=$(date +%Y%m%d_%H%M%S)
 
